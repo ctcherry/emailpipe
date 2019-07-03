@@ -159,14 +159,15 @@ fn handle_web_client(emails: EmailStore, stream: TcpStream) -> io::Result<()> {
     Ok(())
 }
 
-enum SMTPCmd<'a> {
+enum SMTPCmd {
+    Helo(String),
+    RcptTo(String),
+    MailFrom(String),
+    DataStart,
+    DataPart(String),
+    DataEnd,
     Quit,
-    Helo(&'a str),
-    RcptTo(&'a str),
-    MailFrom(&'a str),
-    StartData,
-    Data(&'a str),
-    Unknown(&'a str)
+    Unknown(String)
 }
 
 enum BufOrStream {
@@ -240,8 +241,152 @@ impl<'a> LogIO {
     }
 }
 
+struct SmtpStream {
+    line_buf: String,
+    reader: io::BufReader<TcpStream>,
+    capturing_data: bool
+}
+
+impl SmtpStream {
+    fn new(stream: TcpStream) -> Self {
+        SmtpStream {
+            line_buf: String::with_capacity(1024),
+            reader: BufReader::new(stream),
+            capturing_data: false
+        }
+    }
+}
+
+impl Iterator for SmtpStream {
+
+    type Item = SMTPCmd;
+
+    // next() is the only required method
+    fn next(&mut self) -> Option<Self::Item> {
+
+        self.line_buf.clear();
+
+        match self.reader.read_line(&mut self.line_buf) {
+            Ok(line_len) => {
+                if line_len == 0 {
+                    return None;
+                }
+                if self.capturing_data {
+                    if self.line_buf == ".\r\n" {
+                        return Some(SMTPCmd::DataEnd)
+                    }
+                    let val = self.line_buf.clone();
+                    return Some(SMTPCmd::DataPart(val))
+                }
+
+                let mut cmd_buf = self.line_buf.clone();
+                cmd_buf.make_ascii_lowercase();
+                let cmd = match true {
+                    _ if cmd_buf.starts_with("helo") => {
+                        // 5 = len(helo) + 1
+                        let value_start = 5;
+                        let value_end = line_len - 2;
+                        let val = String::from(&self.line_buf[value_start..value_end]);
+                        return Some(SMTPCmd::Helo(val))
+                    },
+                    _ if cmd_buf.starts_with("rcpt to") => {
+                        // 8 = len(rcpt to) + 1
+                        let value_start = 8;
+                        let value_end = line_len - 2;
+                        let val = String::from(&self.line_buf[value_start..value_end]);
+                        return Some(SMTPCmd::RcptTo(val))
+                    },
+                    _ if cmd_buf.starts_with("mail from") => {
+                        // 10 = len(mail from) + 1
+                        let value_start = 10;
+                        let value_end = line_len - 2;
+                        let val = String::from(&self.line_buf[value_start..value_end]);
+                        return Some(SMTPCmd::MailFrom(val))
+                    },
+                    _ if cmd_buf.starts_with("data") => {
+                        if cmd_buf == "data\r\n" {
+                            self.capturing_data = true;
+                            return Some(SMTPCmd::DataStart)
+                        }
+                    },
+                    _ if cmd_buf.starts_with("quit") => {
+                        return Some(SMTPCmd::Quit)
+                    }
+                };
+
+                let val = self.line_buf.clone();
+                return Some(SMTPCmd::Unknown(val))
+            }
+            Err(err) => {
+                return None
+            }
+        }
+
+    }
+
+}
 
 fn handle_mail_client(emails: EmailStore, stream: TcpStream) -> io::Result<()> {
+
+    let smtp_stream = SmtpStream::new(stream);
+
+    for cmd in smtp_stream {
+        match cmd {
+            SMTPCmd::Helo(_domain) => {
+                write!(w, "250 emailpipe.sh, welcome\r\n")?;
+            }
+            SMTPCmd::RcptTo(raw_email) => {
+
+                match parse_email(raw_email) {
+                    None => write!(w, "501 bad syntax\r\n")?,
+                    Some(email) => {
+                        let hsh = emails.lock().unwrap();
+                        let http_stream = hsh.get(&email.user);
+
+                        match http_stream {
+                            None => write!(w, "550 no such user\r\n")?,
+                            Some(user_stream) => {
+                                let s = (*user_stream).try_clone()?;
+                                w.switch_log_and_flush(s);
+                                write!(w, "250 ok\r\n")?;
+                            }
+                        }
+                    }
+                }
+            }
+            SMTPCmd::MailFrom(raw_email) => {
+                match parse_email(raw_email) {
+                    None => write!(w, "501 bad syntax\r\n")?,
+                    Some(_email) => write!(w, "250 ok\r\n")?
+                }
+            }
+            SMTPCmd::DataStart => {
+                write!(w, "354 End data with <CR><LF>.<CR><LF>\r\n")?;
+                capture_data = true;
+            }
+            SMTPCmd::DataPart(_data) => {
+                write!(w, "250 Ok: queued message\r\n")?;
+                capture_data = false;
+            }
+            SMTPCmd::DataEnd => {
+                write!(w, "250 Ok: queued message\r\n")?;
+                capture_data = false;
+            }
+            SMTPCmd::Quit => {
+                write!(w, "221 bye\r\n")?;
+                w.shutdown();
+                break;
+            }
+            SMTPCmd::Unknown(_) => {
+                write!(w, "500 what?\r\n")?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_mail_client2(emails: EmailStore, stream: TcpStream) -> io::Result<()> {
     let mut stream_writer = stream.try_clone()?;
     write!(stream_writer, "220 emailpipe.sh SMTP emailpipe\r\n")?;
     let mut reader = BufReader::new(stream);
