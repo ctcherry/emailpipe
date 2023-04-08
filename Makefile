@@ -3,6 +3,11 @@ linux-release:
 	@echo "built: target/x86_64-unknown-linux-musl/release/emailpipe"
 
 deploy: linux-release
+	ssh zinc-01 'systemctl stop emailpipe'
+	scp target/x86_64-unknown-linux-musl/release/emailpipe zinc-01:/data/srv/emailpipe/
+	ssh zinc-01 'systemctl start emailpipe'
+
+copy-deploy: linux-release
 	scp target/x86_64-unknown-linux-musl/release/emailpipe zinc-01:/data/srv/emailpipe/
 
 release:

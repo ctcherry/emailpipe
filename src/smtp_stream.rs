@@ -1,5 +1,6 @@
-use std::net::{TcpStream};
-use std::io::{BufReader, BufRead};
+use tokio::io::BufReader;
+use tokio::io::AsyncBufReadExt;
+use tokio::net::tcp::OwnedReadHalf;
 
 pub struct SmtpCmdWrapper {
     pub cmd: SmtpCmd,
@@ -26,36 +27,30 @@ pub enum SmtpCmd {
 
 pub struct SmtpStream {
     line_buf: String,
-    reader: BufReader<TcpStream>,
+    reader: BufReader<OwnedReadHalf>,
     capturing_data: bool
 }
 
 impl SmtpStream {
-    pub fn new(stream: TcpStream) -> Self {
+    pub fn new(stream: OwnedReadHalf) -> Self {
         SmtpStream {
             line_buf: String::with_capacity(1024),
             reader: BufReader::new(stream),
             capturing_data: false
         }
     }
-}
 
-impl Iterator for SmtpStream {
-
-    type Item = SmtpCmdWrapper;
-
-    // next() is the only required method
-    fn next(&mut self) -> Option<Self::Item> {
+    pub async fn next(&mut self) -> Option<SmtpCmdWrapper> {
 
         self.line_buf.clear();
 
-        match self.reader.read_line(&mut self.line_buf) {
+        match self.reader.read_line(&mut self.line_buf).await {
             Ok(line_len) => {
                 if line_len == 0 {
                     return None;
                 }
                 if self.capturing_data {
-                    if self.line_buf == ".\r\n" {
+                    if self.line_buf.starts_with('.') && (2..=3).contains(&self.line_buf.len()) {
                         self.capturing_data = false;
                         return Some(cmd(SmtpCmd::DataEnd, self.line_buf.clone()))
                     }
@@ -87,7 +82,7 @@ impl Iterator for SmtpStream {
                         let val = String::from(&self.line_buf[value_start..value_end]);
                         Some(cmd(SmtpCmd::MailFrom(val), self.line_buf.clone()))
                     },
-                    _ if cmd_buf == "data\r\n" => {
+                    _ if cmd_buf.starts_with("data") && (5..=6).contains(&cmd_buf.len()) => {
                         self.capturing_data = true;
                         Some(cmd(SmtpCmd::DataStart, self.line_buf.clone()))
                     },

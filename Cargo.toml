@@ -2,7 +2,8 @@
 name = "emailpipe"
 version = "0.1.0"
 authors = ["Chris Cherry <ctcherry@gmail.com>"]
-edition = "2018"
+edition = "2021"
 
 [dependencies]
-rand = "0.6"
+rand = "0.8"
+tokio = { version = "1.27.0", features = ["full"] }
